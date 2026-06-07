@@ -2,22 +2,26 @@ const WebSocket = require('ws');
 const PORT = process.env.PORT || 8080;
 const wss = new WebSocket.Server({ port: PORT });
 
-// 存储所有房间数据的对象
 const rooms = {};
 
-wss.on('connection', function connection(ws) {
-    console.log('有新玩家连接到了服务器');
+wss.on('connection', function connection(ws, req) {
+    const ip = req.socket.remoteAddress;
+    console.log(`[系统] 新连接接入: ${ip}`);
+
     let myRoom = null;
     let myRole = null;
 
     ws.on('message', function incoming(message) {
         let msgStr = message.toString();
+        
+        // 监控所有收到的指令
+        console.log(`[消息] 收到来自 [${myRole||'未登记'}] 的数据: ${msgStr}`);
 
-        // 1. 【极简加入房间】使用字符串分割，绝对不会崩溃
+        // 1. 加入房间
         if (msgStr.startsWith('JOIN:')) {
-            const parts = msgStr.split(':'); // 格式: JOIN:111:P1
+            const parts = msgStr.split(':');
             myRoom = parts[1];
-            myRole = (parts[2] || 'P1').toUpperCase(); // 如果没角色，默认为P1
+            myRole = (parts[2] || 'P1').toUpperCase();
 
             if (!rooms[myRoom]) {
                 rooms[myRoom] = { P1: null, P2: null, ready: { P1: false, P2: false }, destroyTimeout: null };
@@ -30,42 +34,43 @@ wss.on('connection', function connection(ws) {
             rooms[myRoom][myRole] = ws;
             rooms[myRoom].ready[myRole] = false;
             
-            console.log(`玩家[${myRole}]加入房间[${myRoom}]`);
+            console.log(`[房间${myRoom}] 玩家[${myRole}] 已登记`);
             
-            // 同步房间状态
             const info = `SYNC:P1=${rooms[myRoom].P1 ? 'READY' : 'EMPTY'}:P2=${rooms[myRoom].P2 ? 'READY' : 'EMPTY'}`;
             if (rooms[myRoom].P1) rooms[myRoom].P1.send(info);
             if (rooms[myRoom].P2) rooms[myRoom].P2.send(info);
             return;
         }
 
-        // 2. 【准备逻辑】收到 READY 暗号
+        // 2. 准备逻辑
         if (msgStr.trim() === 'READY') {
             if (myRoom && rooms[myRoom]) {
-                rooms[myRole === 'P1' ? 'P1' : 'P2'] = ws; // 确保引用正确
                 rooms[myRoom].ready[myRole] = true;
-                console.log(`房间[${myRoom}] 玩家[${myRole}] 已准备`);
+                console.log(`[房间${myRoom}] 状态更新: 玩家[${myRole}] 已准备`);
 
-                // 双方都准备好，通知开战
                 if (rooms[myRoom].ready.P1 && rooms[myRoom].ready.P2) {
+                    console.log(`[房间${myRoom}] 双方就绪，发送开始信号`);
                     rooms[myRoom].P1.send('SYSTEM:START');
                     rooms[myRoom].P2.send('SYSTEM:START');
-                    console.log(`房间[${myRoom}] 双方准备就绪，游戏开始！`);
                 }
             }
             return;
         }
 
-        // 3. 【局内聊天与物理中转】
+        // 3. 聊天转发
         if (msgStr.startsWith('CHAT:')) {
             if (myRoom && rooms[myRoom]) {
+                const chatContent = msgStr.substring(5);
+                console.log(`[房间${myRoom}] 聊天: [${myRole}]说: ${chatContent}`);
                 const targetRole = myRole === 'P1' ? 'P2' : 'P1';
                 const targetWs = rooms[myRoom][targetRole];
                 if (targetWs && targetWs.readyState === WebSocket.OPEN) {
-                    targetWs.send(`MSG:${myRole}:${msgStr.substring(5)}`);
+                    targetWs.send(`MSG:${myRole}:${chatContent}`);
                 }
             }
-        } else if (myRoom && rooms[myRoom]) {
+        } 
+        // 4. 物理数据转发
+        else if (myRoom && rooms[myRoom]) {
             const targetRole = myRole === 'P1' ? 'P2' : 'P1';
             const targetWs = rooms[myRoom][targetRole];
             if (targetWs && targetWs.readyState === WebSocket.OPEN) {
@@ -75,21 +80,22 @@ wss.on('connection', function connection(ws) {
     });
 
     ws.on('close', () => {
+        console.log(`[系统] 玩家[${myRole}]连接关闭`);
         if (myRoom && rooms[myRoom]) {
             rooms[myRoom][myRole] = null;
-            console.log(`玩家[${myRole}]离开房间[${myRoom}]`);
-            
-            // 如果房间没人了，启动 1 分钟销毁倒计时
             if (!rooms[myRoom].P1 && !rooms[myRoom].P2) {
+                console.log(`[房间${myRoom}] 所有人已离开，启动60秒倒计时销毁`);
                 rooms[myRoom].destroyTimeout = setTimeout(() => {
                     if (rooms[myRoom] && !rooms[myRoom].P1 && !rooms[myRoom].P2) {
                         delete rooms[myRoom];
-                        console.log(`房间[${myRoom}]已销毁`);
+                        console.log(`[房间${myRoom}] 已自动销毁`);
                     }
                 }, 60000);
             }
         }
     });
+
+    ws.on('error', (err) => console.error(`[系统] 连接错误:`, err));
 });
 
-console.log(`🎮 联机中转服务器已启动！`);
+console.log(`🎮 联机服务器已启动！`);
