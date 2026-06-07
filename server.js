@@ -1,23 +1,6 @@
-const WebSocket = require('ws');
-
-// 自动获取 Railway 分配的端口，如果没有则默认使用 8080
-const PORT = process.env.PORT || 8080;
-const wss = new WebSocket.Server({ port: PORT });
-
-// 存储所有房间数据的对象
-// 结构: { 房间号: { P1: ws, P2: ws, destroyTimeout: null } }
-const rooms = {};
-
-wss.on('connection', function connection(ws) {
-    console.log('有新玩家连接到了服务器');
-
-    let myRoom = null;
-    let myRole = null;
-
-    ws.on('message', function incoming(message) {
+ws.on('message', function incoming(message) {
         let msgStr;
         try {
-            // 强行把收到的任何数据（Buffer, ArrayBuffer等）转化为标准的UTF-8字符串
             if (Buffer.isBuffer(message)) {
                 msgStr = message.toString('utf8').trim();
             } else if (typeof message === 'string') {
@@ -30,30 +13,49 @@ wss.on('connection', function connection(ws) {
             return;
         }
 
-        // 【逻辑1】处理加入房间请求 (认准英文冒号分隔符)
-        if (msgStr.startsWith('JOIN:')) {
-            const parts = msgStr.split(':');
-            myRoom = parts[1];
-            myRole = parts[2]; // 'P1' 或 'P2'
+        // 📝【超级兼容解析】无论你带不带括号、冒号、分号，只要包含 JOIN、数字、P1/P2，就把它们抠出来
+        // 匹配格式如：JOIN:999:P1 或 JOIN999;P1 或 {"data":"JOIN:999:P1"}
+        if (msgStr.includes('JOIN')) {
+            console.log(`📡 收到原始加入数据: "${msgStr}"`); // 这行能让你看清扩展到底发了什么
+            
+            // 用正则提取出所有的数字（房间号）和 P1/P2（角色）
+            const roomMatch = msgStr.match(/JOIN\D*(\d+)/i); // 提取JOIN后面的数字
+            const roleMatch = msgStr.match(/(P1|P2)/i);      // 提取P1或P2
 
-            // 如果房间不存在，初始化它
-            if (!rooms[myRoom]) {
-                rooms[myRoom] = { P1: null, P2: null, destroyTimeout: null };
+            if (roomMatch && roleMatch) {
+                myRoom = roomMatch[1];
+                myRole = roleMatch[2].toUpperCase(); // 统一变大写
+
+                if (!rooms[myRoom]) {
+                    rooms[myRoom] = { P1: null, P2: null, destroyTimeout: null };
+                }
+
+                if (rooms[myRoom].destroyTimeout) {
+                    clearTimeout(rooms[myRoom].destroyTimeout);
+                    rooms[myRoom].destroyTimeout = null;
+                    console.log(`🔄 销毁倒计时已紧急取消！`);
+                }
+
+                rooms[myRoom][myRole] = ws;
+                console.log(`成功识别身份！玩家 [${myRole}] 进入房间 [${myRoom}]`);
+
+                if (rooms[myRoom]['P1'] && rooms[myRoom]['P2']) {
+                    rooms[myRoom]['P1'].send('SYSTEM:START');
+                    rooms[myRoom]['P2'].send('SYSTEM:START');
+                    console.log(`房间 [${myRoom}] 玩家到齐，游戏正式开始！`);
+                }
+                return;
+            } else {
+                console.log(`❌ 虽包含JOIN，但无法从 "${msgStr}" 中解析出完整的房间号和角色！`);
             }
+        }
 
-            // ⭐【核心改动】如果这个房间正在进行 1 分钟毁灭倒计时，立刻拦截并取消它！
-            if (rooms[myRoom].destroyTimeout) {
-                clearTimeout(rooms[myRoom].destroyTimeout);
-                rooms[myRoom].destroyTimeout = null;
-                console.log(`🔄 有玩家在1分钟内重新连接，房间 [${myRoom}] 销毁倒计时已紧急取消！`);
+        // 【逻辑2】无脑数据中转
+        if (myRoom && rooms[myRoom]) {
+            const targetRole = myRole === 'P1' ? 'P2' : 'P1';
+            const targetWs = rooms[myRoom][targetRole];
+            if (targetWs && targetWs.readyState === WebSocket.OPEN) {
+                targetWs.send(msgStr);
             }
-
-            // 将当前连接记录到对应的角色里
-            rooms[myRoom][myRole] = ws;
-            console.log(`玩家以 [${myRole}] 身份加入了房间 [${myRoom}]`);
-
-            // 如果 P1 和 P2 都到齐了，广播游戏开始暗号
-            if (rooms[myRoom]['P1'] && rooms[myRoom]['P2']) {
-                rooms[myRoom]['P1'].send('SYSTEM:START');
-                rooms[myRoom]['P2'].send('SYSTEM:START');
-                console.log
+        }
+    });
