@@ -3,7 +3,6 @@ const WebSocket = require('ws');
 
 const PORT = process.env.PORT || 8080;
 
-// 1. 原生 http 服务响应健康检查
 const server = http.createServer((req, res) => {
     if (req.url === '/') {
         res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
@@ -14,11 +13,9 @@ const server = http.createServer((req, res) => {
     }
 });
 
-// 2. 绑定 WebSocket 服务
 const wss = new WebSocket.Server({ server });
 const rooms = {};
 
-// 3. 心跳检测机制（每 10 秒戳一下客户端）
 const interval = setInterval(() => {
     wss.clients.forEach((ws) => {
         if (ws.isAlive === false) return ws.terminate();
@@ -31,7 +28,6 @@ wss.on('connection', function connection(ws, req) {
     ws.isAlive = true;
     ws.on('pong', () => { ws.isAlive = true; });
 
-    // 为每个连接分配一个临时的唯一标识，方便在日志中追踪
     const clientIp = req.socket.remoteAddress;
     const clientPort = req.socket.remotePort;
     const clientId = `${clientIp}:${clientPort}`;
@@ -39,12 +35,20 @@ wss.on('connection', function connection(ws, req) {
 
     let myRoom = null;
     let myRole = null;
+    
+    // 🌟 核心优化：用来记录上一次打印的日志内容，防止刷屏
+    ws.lastLogMsg = null;
+    ws.lastFailMsg = null;
 
     ws.on('message', function incoming(message) {
         let msgStr = message.toString().trim();
         if (msgStr === 'NONE' || msgStr === '') return;
 
-        console.log(`[数据接收] 收到来自 [${myRole || '未登记角色'}](${clientId}) 的原始数据: ${msgStr}`);
+        // 🌟 优化 1：收到重复的按键数据时，默默转发，绝不刷屏打印日志
+        if (ws.lastLogMsg !== msgStr) {
+            console.log(`[数据接收] 收到来自 [${myRole || '未登记角色'}](${clientId}) 的内容: ${msgStr}`);
+            ws.lastLogMsg = msgStr; // 记住这次的内容
+        }
 
         // ======= 逻辑 A：加入房间逻辑 =======
         if (msgStr.startsWith('JOIN:')) {
@@ -63,13 +67,12 @@ wss.on('connection', function connection(ws, req) {
             rooms[myRoom][myRole] = ws;
             rooms[myRoom].ready[myRole] = false;
             
-            console.log(`[房间系统] 房间:${myRoom} | 玩家:[${myRole}] 登记成功！(绑定到连接: ${clientId})`);
+            console.log(`[房间系统] 房间:${myRoom} | 玩家:[${myRole}] 登记成功！`);
             
             setTimeout(() => {
                 if (ws.readyState === WebSocket.OPEN) {
                     const info = `SYNC:P1=${rooms[myRoom].P1 ? 'READY' : 'EMPTY'}:P2=${rooms[myRoom].P2 ? 'READY' : 'EMPTY'}`;
                     ws.send(info);
-                    console.log(`[系统发送] 已向 [${myRole}] 发送房间同步状态: ${info}`);
                 }
             }, 100);
             return;
@@ -82,31 +85,29 @@ wss.on('connection', function connection(ws, req) {
                 console.log(`[房间系统] 房间:${myRoom} | 玩家:[${myRole}] 已准备就绪`);
                 
                 if (rooms[myRoom].ready.P1 && rooms[myRoom].ready.P2) {
-                    console.log(`[房间系统] 房间:${myRoom} | 双端均已就绪，正在下发游戏开始指令...`);
+                    console.log(`[房间系统] 房间:${myRoom} | 双端均已就绪，下发游戏开始指令！`);
                     if (rooms[myRoom].P1) rooms[myRoom].P1.send('SYSTEM:START');
                     if (rooms[myRoom].P2) rooms[myRoom].P2.send('SYSTEM:START');
                 }
-            } else {
-                console.log(`[警告] 收到 READY 指令，但该连接未加入任何房间！(来自: ${clientId})`);
             }
             return;
         }
 
-        // ======= 逻辑 C：核心数据转发逻辑（升级增强版） =======
+        // ======= 逻辑 C：核心数据转发逻辑 =======
         if (myRoom && rooms[myRoom]) {
             const targetRole = myRole === 'P1' ? 'P2' : 'P1';
             const targetWs = rooms[myRoom][targetRole];
             
             if (targetWs && targetWs.readyState === WebSocket.OPEN) {
-                // 执行转发
+                // 默默后台转发，不留日志痕迹
                 targetWs.send(msgStr);
-                // 彻底排查时可取消下面这行的注释来观察转发细节
-                // console.log(`[转发成功] 房间:${myRoom} | 已成功将 [${myRole}] 的数据投递给 [${targetRole}]`);
             } else {
-                console.log(`[转发失败] 房间:${myRoom} | [${myRole}] 发送了数据，但对手 [${targetRole}] 当前 ${targetWs ? '连接已断开(NOT OPEN)' : '尚未加入房间(NULL)'}！`);
+                // 🌟 优化 2：即使转发失败，相同的失败报告也只打印一次，防止刷屏
+                if (ws.lastFailMsg !== msgStr) {
+                    console.log(`[转发失败] 房间:${myRoom} | 对手 [${targetRole}] 当前不在房间或已断开。`);
+                    ws.lastFailMsg = msgStr;
+                }
             }
-        } else {
-            console.log(`[拦截丢弃] 拦截到未注册连接(${clientId})发送的游戏数据: "${msgStr}"。原因：该玩家还未发送 JOIN 指令加入房间！`);
         }
     });
 
@@ -130,7 +131,6 @@ wss.on('close', () => {
     clearInterval(interval);
 });
 
-// 4. 监听端口启动服务
 server.listen(PORT, () => {
-    console.log(`🎮 ⚙️ 增强诊断版中转服务器已成功启动，正在监听端口: ${PORT}`);
+    console.log(`🎮 中转服务器升级成功！已开启智能去重静音日志，正在监听: ${PORT}`);
 });
